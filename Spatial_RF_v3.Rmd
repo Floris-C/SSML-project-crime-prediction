@@ -1,0 +1,365 @@
+---
+title: "Spatial_RF"
+author: "Philippa Linardatos"
+date: "2024-03-21"
+output: html_document
+---
+
+```{r}
+#load libraries
+easypackages::packages ("sf", "sp", "spdep", "Matrix", "spatialreg", "spgwr", "geostan", "tmap", "mapview", "car", "RColorBrewer", "cowplot", "leafsync", "leaflet.extras2", "mapview", "lmtest", "tseries", "dplyr", "ggplot2", "tidyverse")
+```
+
+```{r}
+zh_data <- st_read("complete_merge_v2/complete_merge.shp")
+zh_data <- drop_na(zh_data)
+```
+
+```{r}
+names(zh_data)
+```
+
+
+```{r}
+crime_map <- mapview::mapview(zh_data, zcol = "PHYS_CRIME", col.regions=brewer.pal(9, "YlOrRd"))
+```
+
+```{r}
+crime_map
+```
+
+```{r}
+zh_data_nbq <- poly2nb(zh_data, queen=TRUE)
+```
+
+
+```{r}
+summary(zh_data_nbq)
+```
+
+
+```{r}
+zh_data_nbq_w <- nb2listw(zh_data_nbq, style="W", zero.policy = TRUE)
+```
+
+
+```{r}
+coordsW <- zh_data%>%
+  st_centroid()%>%
+  st_geometry()
+```
+
+```{r}
+plot(zh_data_nbq, st_geometry(coordsW), col="red")
+```
+
+```{r}
+Crimenumbers <- zh_data$PHYS_CRIME
+mc_global <- moran.mc(Crimenumbers, zh_data_nbq_w, 2999, alternative="greater")
+plot(mc_global)
+```
+
+
+```{r}
+mc_global
+```
+
+```{r}
+easypackages::packages ("sf", "sp", "tmap", "mapview", "car", "RColorBrewer", "tidyverse", "osmdata", "nngeo", "FNN", "rpart", "rpart.plot", "sessioninfo", "caret", "rattle", "ipred", "tidymodels", "ranger", "modelStudio", "DALEX", "DALEXtra", "vip", "pdp", "rgeos", "spatialRF")
+```
+
+```{r}
+zh_datacen <- st_centroid(zh_data)
+```
+
+```{r}
+#We need an unique ID and coordinates for evaluating the spatial correlations
+zh_data$id <- 1:nrow(zh_datacen) #this is to give an unique ID to each row
+zh_datacen$x <- st_coordinates(zh_datacen)[, 1] #get the X coordinate of the point
+zh_datacen$y <- st_coordinates(zh_datacen)[, 2] #get the Y coordinate of the point
+
+
+#now convert the file into a SP object, as the gDistance function we are using from rgeos package can only work on SP object
+zh_datacen_sp <- as_Spatial(zh_datacen)
+
+#calculate the distance matrix based on sp object
+distance_matrix <- gDistance(zh_datacen_sp, byid=TRUE)
+
+#distance thresholds (same units as distance_matrix)
+distance.thresholds <- c(0, 100, 300, 500, 800, 1000, 1500, 2000, 3000, 4000, 10000, 11000, 12000, 13000, 14000, 15000, 16000, 17000, 18000, 19000, 20000, 25000, 27000, 28000, 29000) #these thresholds indicates when we are considering spatial pattern how far we look for neighborhoods, in this case we are going up to 500 m
+
+#drop the geometry column from the main sf object so it does not cause issues with the spatialRF functions
+zh_datacen_spdf <- zh_datacen %>% st_drop_geometry()
+
+#create a xy list for coordinates to plot local importance, if you want check details: https://blasbenito.github.io/spatialRF/
+xy <- zh_datacen_spdf[, c("x", "y")]
+```
+
+
+```{r}
+random.seed <- set.seed(123)
+
+predictor_vars <- c("AANT_INW", "OPP_LAND", "P_MALE_ISH", "P_FEM_ISH", "P_00_14_JR", "P_15_24_JR", "P_25_44_JR", "P_45_64_JR", "P_65_EO_JR", "P_HUURWON", "P_KOOPWON", "CARS_PP", "AF_ARTSPR", "AF_ZIEK_I", "AF_SUPERM", "AF_TREINST", "AF_OVERST", "AF_ONDBAS", "AF_ONDVRT", "AF_BIBLIO", "INK_ONTV2", "P_OPL_LG", "P_OPL_MD", "P_OPL_HG", "P_PUB_TREE", "P_PUB_GREE", "P_PUB_GREY", "P_UIT_WH", "P_UIT_BS", "P_UIT_WAO", "P_WORKING")
+
+
+#fitting a non-spatial RF model with spatialRF package's rf function
+CrimeRF <- spatialRF::rf(
+  data = zh_datacen_spdf,
+  dependent.variable.name = "PHYS_CRIME",
+  predictor.variable.names = predictor_vars,
+  distance.matrix = distance_matrix,
+  distance.thresholds = distance.thresholds,
+  xy = xy,  
+  ranger.arguments = list(
+    mtry = 3,
+    min.node.size = 5,
+    num.trees = 500
+  ),
+  verbose = FALSE,
+  seed = random.seed,
+  n.cores = 6
+)
+
+#print the model result
+CrimeRF
+```
+ [1] "BU_CODE"    "BU_NAAM"    "AANT_INW"   "AANT_MAN"   "AANT_VROUW" "P_00_14_JR" "P_15_24_JR" "P_25_44_JR"
+ [9] "P_45_64_JR" "P_65_EO_JR" "P_KOOPWON"  "P_HUURWON"  "AUTO_TOT"   "AF_ARTSPR"  "AF_ZIEK_I"  "AF_SUPERM" 
+[17] "AF_TREINST" "AF_OVERST"  "AF_ONDBAS"  "AF_ONDVRT"  "AF_BIBLIO"  "OPP_LAND"   "physical_c" "perc_openb"
+[25] "p_low_ed"   "p_med_ed"   "p_hgh_ed"   "INK_ONTV2"  "INK_INW2"   "A_OPL_MD"
+
+```{r}
+#plot the variable importance for non spatial RF
+p0 <- spatialRF::plot_importance(
+  CrimeRF,
+  verbose = FALSE
+) +  ggplot2::ggtitle("Non Spatial RF model") 
+
+p0
+```
+
+
+```{r}
+#Spatial RF
+spatialCrimeRF <- spatialRF::rf_spatial(
+  data = zh_datacen_spdf,
+  dependent.variable.name = "PHYS_CRIME",
+  predictor.variable.names = predictor_vars,
+  distance.matrix = distance_matrix,
+  distance.thresholds = 29000, #auto correlation threshold
+  ranger.arguments = list( #this part we keep same as non-spatial model
+    mtry = 3,
+    min.node.size = 5,
+    num.trees = 500
+  ),
+  verbose = FALSE,
+  seed = random.seed,
+  n.cores = 6
+  )
+
+#print the model result
+spatialCrimeRF
+```
+
+```{r}
+#Plot the VIP
+p1 <- spatialRF::plot_importance(
+  spatialCrimeRF,
+  verbose = FALSE
+) + 
+  ggplot2::ggtitle("Spatial RF model") 
+
+#p1
+
+#compare the two plots
+p0 | p1
+```
+
+```{r}
+unregister_dopar <- function() {
+  env <- foreach:::.foreachGlobals
+  rm(list=ls(name=env), pos=env)
+  print("de registered parallels")
+}
+
+unregister_dopar()
+
+```
+
+```{r}
+
+spatialCrimeRF <- rf_tuning(
+  model = spatialCrimeRF,
+  xy = xy, #location indicating coordinates of each neighborhood 
+  repetitions = 5, #times the tuning process will run, such as K fold CV, here 5 means we used 5 folds
+  # parameters to tune:
+  num.trees = c(10, 100, 300, 500), #the range within which the number of trees the model can select
+  min.node.size = c(3, 9, 15), #minimum rows the model can pick between 5 to 15
+  mtry = c(3,6,12,29), #seq(2, length(predictor_vars), by = 3), # no. of predictors
+  
+  seed = random.seed,
+  n.cores = 6, #used for faster calculation, check how many cores your laptop has before selecting the core numbers
+  verbose = TRUE
+)
+
+spatialCrimeRF
+```
+
+
+```{r}
+#Repeat the spatial RF process 
+spatialCrimeRF.repeat <- spatialRF::rf_repeat(
+  model = spatialCrimeRF, 
+  repetitions = 5,
+  seed = random.seed,
+  verbose = TRUE
+)
+
+spatialCrimeRF.repeat
+```
+
+```{r}
+spatialCrimeRF.repeat$variable.importance
+spatialCrimeRF.repeat$variable.importance.local
+```
+```{r}
+local_importance <- abs(spatialCrimeRF.repeat$variable.importance.local$P_PUB_TREE)
+
+
+north_arrow <- annotation_north_arrow(location = "bl", scale = 0.1, pad_x = unit(0.1, "in"), pad_y = unit(0.1, "in"), height = unit(1, "cm"), width = unit(1, "cm"))
+scale_bar <- annotation_scale(location = "br", dist = 5, dist_unit = "km", transform = TRUE, model_trans = 1e3)
+
+local_importance_plot <- ggplot() +
+  geom_sf(data = zh_data, aes(fill = local_importance)) +
+  scale_fill_gradientn(colors = brewer.pal(9, "YlOrRd")) +
+  labs(title = "Variable importance for % of area that is publicly accessible trees") +
+  theme_minimal() +
+  north_arrow +
+  scale_bar
+
+
+ggsave("local_importance_plot.png", local_importance_plot, width = 10, height = 8)
+plot
+```
+
+
+```{r}
+ importance_plot <- spatialCrimeRF.repeat$importance$per.repetition.plot
+ggsave("importance_plot.png", importance_plot, width = 10, height = 8)
+```
+
+
+
+```{r}
+zh_data$Residual <- rowMeans(spatialCrimeRF.repeat$residuals$values.repetitions)
+res_map <- mapview::mapview(zh_data, zcol = "Residual", col.regions=brewer.pal(9, "YlOrRd"))
+res_map
+```
+
+
+```{r}
+
+```
+
+### SCALE BAR AND NORTH ARROW
+
+```{r}
+library(ggspatial)
+Residuals <- abs(zh_data$Residual)
+
+north_arrow <- annotation_north_arrow(location = "bl", scale = 0.1, pad_x = unit(0.1, "in"), pad_y = unit(0.1, "in"), height = unit(1, "cm"), width = unit(1, "cm"))
+scale_bar <- annotation_scale(location = "br", dist = 5, dist_unit = "km", transform = TRUE, model_trans = 1e3)
+
+residual_plot <- ggplot() +
+  geom_sf(data = zh_data, aes(fill = Residual)) +
+  scale_fill_gradientn(colors = brewer.pal(9, "YlOrRd")) +
+  labs(title = "Tuned Spatial Random Forest Residuals Per Neighbourhood") +
+  theme_minimal() +
+  north_arrow +
+  scale_bar
+
+ggsave("spatial_crime_residuals_north.png", residual_plot, width = 10, height = 8)
+residual_plot
+```
+
+```{r}
+ggsave("spatial_crime_residuals_north.pdf", residual_plot, width = 10, height = 8)
+```
+
+
+```{r}
+plot <- ggplot() +
+  geom_sf(data = zh_data, aes(fill = Residuals)) +
+  scale_fill_gradientn(colors = brewer.pal(9, "YlOrRd")) +
+  labs(title = "Tuned Spatial Random Forest Residuals Per Neighbourhood") +
+  theme_minimal()
+
+plot
+```
+
+```{r}
+ggsave("spatial_crime_residuals.pdf", plot, width = 10, height = 8)
+```
+
+```{r}
+barplot(zh_data$PHYS_CRIME)
+```
+
+
+```{r}
+hist(zh_data$Residuals, breaks = 100)
+```
+
+
+```{r}
+sum(zh_data$Residual >= -25 & zh_data$Residual <= 25)
+
+```
+
+
+```{r}
+sum(zh_data$Residual >= -2000 & zh_data$Residual <= 2000)
+```
+
+```{r}
+actionable_variables <- c("P_UIT_BS", "P_PUB_TREE", "P_WORKING")
+for (v in actionable_variables) {
+  print(v, cor(zh_data$PHYS_CRIME, zh_data$v))
+}
+
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+
+
+
+
+
+
